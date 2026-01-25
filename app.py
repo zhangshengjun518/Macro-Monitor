@@ -31,28 +31,43 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("⚡ 全球宏观“三流”监控 (稳定版)")
-st.caption("单线程加载 | 确保稳定性 | 永久在线")
+st.title("⚡ 全球宏观“三流”监控 (稳定修复版)")
+st.caption("颜色兼容性修复 | 单线程加载 | 永久在线")
 
 # ====================
-# 2. 数据引擎 (单线程·不卡顿版)
+# 2. 辅助函数：颜色转换 (核心修复)
+# ====================
+def hex_to_rgba(hex_color, alpha=0.2):
+    """
+    将 Hex 颜色 (#RRGGBB) 转换为 Plotly 绝对兼容的 rgba(r, g, b, a) 格式
+    """
+    hex_color = hex_color.lstrip('#')
+    if len(hex_color) == 6:
+        r = int(hex_color[0:2], 16)
+        g = int(hex_color[2:4], 16)
+        b = int(hex_color[4:6], 16)
+        return f"rgba({r}, {g}, {b}, {alpha})"
+    return hex_color # 如果格式不对，原样返回
+
+# ====================
+# 3. 数据引擎 (单线程稳定版)
 # ====================
 @st.cache_data(ttl=3600*4) 
 def get_data_stable():
     data_store = {}
     
-    # --- 阶段 1: 美联储数据 (FRED) ---
-    # 使用 st.status 显示详细进度，让用户知道没卡死
+    # 使用 st.status 显示进度
     with st.status("正在建立金融数据链路...", expanded=True) as status:
         
+        # --- 阶段 1: 美联储数据 (FRED CSV直连) ---
         status.write("📡 连接圣路易斯联储 (FRED)...")
         codes = {'WTREGEN': 'TGA', 'RRPONTSYD': 'ON_RRP', 'WALCL': 'Fed_BS', 'SOFR': 'SOFR', 'DFF': 'Fed_Funds', 'T10Y2Y': 'Yield_Curve'}
         for code_fred, name_internal in codes.items():
             try:
-                # 直连 CSV，最快最稳
                 url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={code_fred}"
                 df = pd.read_csv(url, index_col=0, parse_dates=True)
-                start_date = datetime.now() - timedelta(days=365*2) # 取2年
+                # 只取最近2年
+                start_date = datetime.now() - timedelta(days=365*2)
                 df = df[df.index >= start_date]
                 data_store[name_internal] = df.iloc[:, 0].resample('D').interpolate(method='time', limit=5).dropna()
             except Exception as e:
@@ -64,21 +79,20 @@ def get_data_stable():
             idx = s1.index.intersection(s2.index)
             data_store['Liquidity_Stress'] = (s1.loc[idx] - s2.loc[idx]) * 100
 
-        status.write("💰 连接全球市场数据 (Yahoo)...")
         # --- 阶段 2: 市场数据 (Yahoo) ---
+        status.write("💰 连接全球市场数据 (Yahoo)...")
         tickers = {
             "Gold": "GC=F", "Oil": "CL=F", "Copper": "HG=F",
             "DXY": "DX-Y.NYB", "CNH": "CNY=X", "US10Y": "^TNX", 
             "A50_HK": "2823.HK"
         }
         
-        # 逐个下载，避免并发导致内存溢出
         for key, symbol in tickers.items():
             try:
-                # 显式关闭多线程 threads=False
+                # 显式关闭多线程
                 df = yf.download(symbol, period="1y", progress=False, threads=False)
                 if not df.empty:
-                    # 处理多层索引问题 (yfinance 新版特性)
+                    # 兼容性处理
                     if isinstance(df.columns, pd.MultiIndex):
                         series = df['Close'].iloc[:, 0].dropna()
                     else:
@@ -94,7 +108,7 @@ def get_data_stable():
             except Exception as e:
                 print(f"Error fetching {key}: {e}")
 
-        # 计算衍生指标
+        # 计算比率
         if 'Gold' in data_store and 'Oil' in data_store:
             c = data_store['Gold'].index.intersection(data_store['Oil'].index)
             data_store['Gold_Oil'] = data_store['Gold'].loc[c] / data_store['Oil'].loc[c]
@@ -103,11 +117,10 @@ def get_data_stable():
     
     return data_store
 
-# 执行数据获取
 data = get_data_stable()
 
 # ====================
-# 3. 绘图与展示
+# 4. 绘图与展示
 # ====================
 def plot_card(series, title_cn, title_en, color, lu_analysis, precision=2):
     if series is None or series.empty: return
@@ -141,13 +154,14 @@ def plot_card(series, title_cn, title_en, color, lu_analysis, precision=2):
         diff = y_max - y_min
         padding = 0.0005 if (precision == 4 and diff < 0.05) else diff * 0.1
         
-        # 修复颜色Hex格式
-        fill_color_fixed = f"{color}33" 
+        # 【核心修复】使用 hex_to_rgba 函数转换颜色
+        fill_color_safe = hex_to_rgba(color, alpha=0.2)
 
         fig.add_trace(go.Scatter(
             x=display.index, y=display.values, mode='lines', 
             line=dict(color=color, width=2), 
-            fill='tozeroy', fillcolor=fill_color_fixed
+            fill='tozeroy', 
+            fillcolor=fill_color_safe # 这里不会再报错了
         ))
         fig.update_layout(
             margin=dict(l=0, r=0, t=0, b=0), height=300, 
