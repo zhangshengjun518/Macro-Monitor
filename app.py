@@ -6,10 +6,10 @@ from datetime import datetime, timedelta
 import numpy as np
 
 # ====================
-# 1. 页面配置 (复刻原有)
+# 1. 页面配置
 # ====================
 st.set_page_config(
-    page_title="全球宏观三流监控 (资产负债表深度穿透版)",
+    page_title="全球宏观三流监控 (Cloud Stable)",
     layout="wide",
     initial_sidebar_state="collapsed"
 )
@@ -31,154 +31,168 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("⚡ 全球宏观“三流”监控 (资产负债表穿透版)")
-st.caption("全量指标保留 | 深度穿透资产负债表 | 实时数据流")
+st.title("⚡ 全球宏观“三流”监控 (稳定修复版)")
+st.caption("颜色兼容性修复 | 单线程加载 | 永久在线")
 
 # ====================
-# 2. 辅助函数 (复刻原有)
+# 2. 辅助函数：颜色转换 (核心修复)
 # ====================
 def hex_to_rgba(hex_color, alpha=0.2):
+    """
+    将 Hex 颜色 (#RRGGBB) 转换为 Plotly 绝对兼容的 rgba(r, g, b, a) 格式
+    """
     hex_color = hex_color.lstrip('#')
     if len(hex_color) == 6:
-        r, g, b = int(hex_color[0:2], 16), int(hex_color[2:4], 16), int(hex_color[4:6], 16)
+        r = int(hex_color[0:2], 16)
+        g = int(hex_color[2:4], 16)
+        b = int(hex_color[4:6], 16)
         return f"rgba({r}, {g}, {b}, {alpha})"
-    return hex_color
+    return hex_color # 如果格式不对，原样返回
 
 # ====================
-# 3. 增强型数据引擎 (稳定+全量)
+# 3. 数据引擎 (单线程稳定版)
 # ====================
-@st.cache_data(ttl=3600*2) 
-def get_macro_data():
+@st.cache_data(ttl=3600*4) 
+def get_data_stable():
     data_store = {}
-    with st.status("正在建立全球宏观链路...", expanded=True) as status:
-        # --- 阶段 1: FRED 资产负债表细分 (实时穿透) ---
-        status.write("📡 穿透圣路易斯联储 (FRED)...")
-        # WALCL:总资产, WTREGEN:TGA, RRPONTSYD:逆回购, WRESBAL:准备金, WSHOMCB:国债, WSHMBS:MBS
-        fred_codes = {
-            'WALCL': 'Fed_BS', 'WTREGEN': 'TGA', 'RRPONTSYD': 'ON_RRP',
-            'WRESBAL': 'Reserves', 'WSHOMCB': 'Fed_Treasury', 'WSHMBS': 'Fed_MBS',
-            'SOFR': 'SOFR', 'DFF': 'Fed_Funds', 'T10Y2Y': 'Yield_Curve'
-        }
-        for code, name in fred_codes.items():
+    
+    # 使用 st.status 显示进度
+    with st.status("正在建立金融数据链路...", expanded=True) as status:
+        
+        # --- 阶段 1: 美联储数据 (FRED CSV直连) ---
+        status.write("📡 连接圣路易斯联储 (FRED)...")
+        codes = {'WTREGEN': 'TGA', 'RRPONTSYD': 'ON_RRP', 'WALCL': 'Fed_BS', 'SOFR': 'SOFR', 'DFF': 'Fed_Funds', 'T10Y2Y': 'Yield_Curve'}
+        for code_fred, name_internal in codes.items():
             try:
-                url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={code}"
+                url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={code_fred}"
                 df = pd.read_csv(url, index_col=0, parse_dates=True)
-                data_store[name] = df.iloc[:, 0].resample('D').interpolate(method='time', limit=5).dropna()
-            except: pass
+                # 只取最近2年
+                start_date = datetime.now() - timedelta(days=365*2)
+                df = df[df.index >= start_date]
+                data_store[name_internal] = df.iloc[:, 0].resample('D').interpolate(method='time', limit=5).dropna()
+            except Exception as e:
+                print(f"Error fetching {name_internal}: {e}")
+        
+        # 计算压力指标
+        if 'SOFR' in data_store and 'Fed_Funds' in data_store:
+            s1, s2 = data_store['SOFR'], data_store['Fed_Funds']
+            idx = s1.index.intersection(s2.index)
+            data_store['Liquidity_Stress'] = (s1.loc[idx] - s2.loc[idx]) * 100
 
-        # --- 阶段 2: Yahoo 市场数据 (复刻全量) ---
+        # --- 阶段 2: 市场数据 (Yahoo) ---
         status.write("💰 连接全球市场数据 (Yahoo)...")
         tickers = {
             "Gold": "GC=F", "Oil": "CL=F", "Copper": "HG=F",
             "DXY": "DX-Y.NYB", "CNH": "CNY=X", "US10Y": "^TNX", 
             "A50_HK": "2823.HK"
         }
+        
         for key, symbol in tickers.items():
             try:
+                # 显式关闭多线程
                 df = yf.download(symbol, period="1y", progress=False, threads=False)
                 if not df.empty:
-                    series = df['Close'].iloc[:, 0] if isinstance(df.columns, pd.MultiIndex) else df['Close']
-                    data_store[key] = series.dropna()
-            except: pass
+                    # 兼容性处理
+                    if isinstance(df.columns, pd.MultiIndex):
+                        series = df['Close'].iloc[:, 0].dropna()
+                    else:
+                        series = df['Close'].dropna()
+                    
+                    # 去死线
+                    if len(series) > 5 and series.tail(5).std() == 0:
+                        last_val = series.iloc[-1]
+                        diff_idx = series[series != last_val].last_valid_index()
+                        if diff_idx: series = series[:diff_idx]
+                    
+                    data_store[key] = series
+            except Exception as e:
+                print(f"Error fetching {key}: {e}")
 
-        # 计算原有比率指标
+        # 计算比率
         if 'Gold' in data_store and 'Oil' in data_store:
             c = data_store['Gold'].index.intersection(data_store['Oil'].index)
             data_store['Gold_Oil'] = data_store['Gold'].loc[c] / data_store['Oil'].loc[c]
-        
-        # 计算新增流量指标：净流动性
-        if all(k in data_store for k in ['Fed_BS', 'TGA', 'ON_RRP']):
-            data_store['Net_Liquidity'] = data_store['Fed_BS'] - data_store['TGA'] - data_store['ON_RRP']
 
-        status.update(label="✅ 全量数据同步完成!", state="complete", expanded=False)
+        status.update(label="✅ 数据同步完成!", state="complete", expanded=False)
+    
     return data_store
 
-data = get_macro_data()
+data = get_data_stable()
 
 # ====================
-# 4. 绘图函数 (复刻原有 + 一行一图逻辑)
+# 4. 绘图与展示
 # ====================
-def plot_full_card(series, title_cn, title_en, color, lu_analysis, precision=2, is_large=False):
+def plot_card(series, title_cn, title_en, color, lu_analysis, precision=2):
     if series is None or series.empty: return
     display = series.tail(90)
     curr = display.iloc[-1]
-    prev = display.iloc[-2]
+    prev = display.iloc[-2] if len(display) > 1 else curr
     delta = (curr - prev) / prev * 100
     
-    fmt = f".{precision}f" if precision >= 2 else (",.0f" if curr > 1000 else ",.2f")
+    fmt = f".{precision}f" if precision == 4 else (",.0f" if curr > 1000 else ",.2f")
     fmt_val = f"{curr:{fmt}}"
     d_col = "#FF5252" if delta < 0 else "#00E676"
     
-    # 容器渲染
     st.markdown(f"""
     <div class="full-card">
         <div class="card-title">{title_cn} <span>{title_en}</span></div>
-        <div style="display:flex; flex-wrap: wrap;">
-            <div style="flex:1; min-width: 250px;">
+        <div style="display:flex;">
+            <div style="flex:1;">
                 <div class="big-value" style="color:{color}">{fmt_val}</div>
                 <div style="font-size:1.2rem; color:{d_col}; font-weight:bold;">{delta:.2f}%</div>
-                <div class="lu-comment-box">
-                    <div class="lu-label">🎙️ 视角：</div>
-                    <div class="lu-text">{lu_analysis}</div>
-                </div>
+                <div class="lu-comment-box"><div class="lu-label">🎙️ 卢麒元视角：</div><div class="lu-text">{lu_analysis}</div></div>
             </div>
-            <div style="flex:2.5; min-width: 500px; height: 350px;" id="chart_{title_en.replace(' ','_')}">
-            </div>
+            <div style="flex:2;"></div>
         </div>
     </div>
     """, unsafe_allow_html=True)
 
-    # 绘制图表 (强制一行一图感观)
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=display.index, y=display.values, mode='lines', 
-        line=dict(color=color, width=3), 
-        fill='tozeroy', fillcolor=hex_to_rgba(color, 0.15)
-    ))
-    fig.update_layout(
-        margin=dict(l=0, r=0, t=20, b=0), height=350, 
-        paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', 
-        xaxis=dict(showgrid=True, gridcolor='#333'),
-        yaxis=dict(showgrid=True, gridcolor='#333', side="right", tickformat=f".{precision}f")
-    )
-    st.plotly_chart(fig, use_container_width=True)
+    c1, c2 = st.columns([1, 3])
+    with c2:
+        fig = go.Figure()
+        y_min, y_max = display.min(), display.max()
+        diff = y_max - y_min
+        padding = 0.0005 if (precision == 4 and diff < 0.05) else diff * 0.1
+        
+        # 【核心修复】使用 hex_to_rgba 函数转换颜色
+        fill_color_safe = hex_to_rgba(color, alpha=0.2)
 
-# ====================
-# 5. 页面渲染 (严格排版)
-# ====================
+        fig.add_trace(go.Scatter(
+            x=display.index, y=display.values, mode='lines', 
+            line=dict(color=color, width=2), 
+            fill='tozeroy', 
+            fillcolor=fill_color_safe # 这里不会再报错了
+        ))
+        fig.update_layout(
+            margin=dict(l=0, r=0, t=0, b=0), height=300, 
+            paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', 
+            xaxis=dict(showgrid=True, gridcolor='#333', tickformat="%Y-%m-%d"), 
+            yaxis=dict(showgrid=True, gridcolor='#333', range=[y_min-padding, y_max+padding], side="right", tickformat=f".{precision}f")
+        )
+        st.plotly_chart(fig, use_container_width=True)
 
-# --- 概览栏 ---
-st.markdown("### 📝 实时盘面核心")
-c1, c2, c3, c4 = st.columns(4)
-if 'Gold' in data: c1.metric("黄金 (Gold)", f"${data['Gold'].iloc[-1]:,.0f}", f"{(data['Gold'].iloc[-1]/data['Gold'].iloc[-2]-1)*100:.2f}%")
-if 'DXY' in data: c2.metric("美元 (DXY)", f"{data['DXY'].iloc[-1]:.2f}", f"{(data['DXY'].iloc[-1]/data['DXY'].iloc[-2]-1)*100:.2f}%")
-if 'CNH' in data: c3.metric("人民币 (CNH)", f"{data['CNH'].iloc[-1]:.4f}", f"{(data['CNH'].iloc[-1]/data['CNH'].iloc[-2]-1)*100:.4f}%", delta_color="inverse")
-if 'Fed_BS' in data: c4.metric("美联储规模", f"${data['Fed_BS'].iloc[-1]/1e6:.2f}T", f"{(data['Fed_BS'].iloc[-1]-data['Fed_BS'].iloc[-2])/1e6:.3f}T")
+# 渲染概览
+st.markdown("### 📝 核心指标概览")
+col1, col2, col3 = st.columns(3)
+if 'Gold' in data: 
+    with col1: st.metric("黄金 (Gold)", f"${data['Gold'].iloc[-1]:,.0f}", f"{(data['Gold'].iloc[-1]/data['Gold'].iloc[-2]-1)*100:.2f}%")
+if 'DXY' in data: 
+    with col2: st.metric("美元 (DXY)", f"{data['DXY'].iloc[-1]:.2f}", f"{(data['DXY'].iloc[-1]/data['DXY'].iloc[-2]-1)*100:.2f}%")
+if 'CNH' in data: 
+    with col3: st.metric("人民币 (CNY)", f"{data['CNH'].iloc[-1]:.4f}", f"{(data['CNH'].iloc[-1]/data['CNH'].iloc[-2]-1)*100:.4f}%", delta_color="inverse")
 
-# --- 板块 0: 流量监控 (Flow Monitor) ---
-st.markdown('<div class="section-header">🌊 流量监控 (Flow Monitor)</div>', unsafe_allow_html=True)
-plot_full_card(data.get('Net_Liquidity'), "核心净流动性", "Net Liquidity", "#00E676", "真正流入金融系统的活钱，是所有资产的发动机。", 0)
+# 详细图表
+st.markdown('<div class="section-header">1. 流量 (Quantity)</div>', unsafe_allow_html=True)
+plot_card(data.get('TGA'), "财政部账户", "TGA Balance", "#00B0FF", "TGA水位变化体现财政部对流动性的态度。", 0)
+plot_card(data.get('ON_RRP'), "逆回购规模", "ON RRP", "#2962FF", "美元蓄水池，跌破2000亿即为枯竭警报。", 0)
+plot_card(data.get('Fed_BS'), "美联储资产负债表", "Fed Balance Sheet", "#6200EA", "央行底仓，曲线向下代表QT缩表。", 0)
 
-# --- 板块 1: 资产负债表总额 & 资产端 ---
-st.markdown('<div class="section-header">1. 资产端穿透 (Quantity - Assets)</div>', unsafe_allow_html=True)
-plot_full_card(data.get('Fed_BS'), "美联储总资产", "Total Assets", "#FFD700", "扩表代表购买，缩表代表抛售或到期收钱。", 0)
-plot_full_card(data.get('Fed_Treasury'), "持有美国国债", "Treasury Holdings", "#03A9F4", "美联储最核心的资产，反映其对国债市场的支撑。", 0)
-plot_full_card(data.get('Fed_MBS'), "持有房贷证券", "MBS Holdings", "#00BCD4", "反映对房地产市场的流动性支持。", 0)
+st.markdown('<div class="section-header">2. 流速 (Velocity)</div>', unsafe_allow_html=True)
+plot_card(data.get('Gold'), "现货黄金", "Spot Gold", "#FFD700", "美元信用的反向指标。", 0)
+plot_card(data.get('Gold_Oil'), "金油比", "Gold/Oil Ratio", "#FBC02D", "严重衰退预警指标 (>30)。", 2)
+plot_card(data.get('US10Y'), "10年美债", "US 10Y Yield", "#FF5252", "全球资产定价之锚。", 2)
 
-# --- 板块 2: 负债端穿透 ---
-st.markdown('<div class="section-header">2. 负债端穿透 (Quantity - Liabilities)</div>', unsafe_allow_html=True)
-plot_full_card(data.get('Reserves'), "银行体系准备金", "Reserve Balances", "#FF5252", "银行存放在美联储的钱，流动性的终端水位。", 0)
-plot_full_card(data.get('TGA'), "财政部账户", "TGA Balance", "#AA00FF", "美国政府的钱包，余额越高，市场流动的钱越少。", 0)
-plot_full_card(data.get('ON_RRP'), "隔夜逆回购规模", "ON RRP", "#FF9100", "市场的溢出资金，跌至零点意味着流动性枯竭警报。", 0)
-
-# --- 板块 3: 原有流速指标 ---
-st.markdown('<div class="section-header">3. 流速与定价 (Velocity)</div>', unsafe_allow_html=True)
-plot_full_card(data.get('Gold'), "现货黄金", "Spot Gold", "#FFD700", "美元信用的反向指标。", 0)
-plot_full_card(data.get('Gold_Oil'), "金油比", "Gold/Oil Ratio", "#FBC02D", "严重衰退预警指标 (>30)。", 2)
-plot_full_card(data.get('US10Y'), "10年美债收益率", "US 10Y Yield", "#FF5252", "全球资产定价之锚。", 2)
-
-# --- 板块 4: 原有流向指标 ---
-st.markdown('<div class="section-header">4. 汇率与流向 (Direction)</div>', unsafe_allow_html=True)
-plot_full_card(data.get('CNH'), "在岸人民币", "USD/CNY", "#00E676", "关注小数点后4位的博弈。", 4)
-plot_full_card(data.get('DXY'), "美元指数", "DXY Index", "#64DD17", "美元周期的晴雨表。", 2)
-plot_full_card(data.get('A50_HK'), "安硕A50 (港)", "2823.HK", "#AA00FF", "外资对中国核心资产的态度。", 2)
+st.markdown('<div class="section-header">3. 流向 (Direction)</div>', unsafe_allow_html=True)
+plot_card(data.get('CNH'), "在岸人民币", "USD/CNY", "#00E676", "关注小数点后4位的微观博弈。", 4)
+plot_card(data.get('DXY'), "美元指数", "DXY Index", "#64DD17", "美元周期的晴雨表。", 2)
+plot_card(data.get('A50_HK'), "安硕A50 (港)", "2823.HK", "#AA00FF", "外资对中国核心资产的态度。", 2)
